@@ -45,6 +45,16 @@ pub fn find_fonts() -> Result<Vec<FontBlob>> {
         "Source Han Code JP",
         "Sarasa Mono J",
     ];
+    // symbols / braille / geometric shapes fallback — many programming TUIs
+    // (spinners in claude code, ⏵ / ▶ style indicators) depend on these blocks.
+    let symbols = [
+        "Noto Sans Symbols 2",
+        "Noto Sans Symbols",
+        "DejaVu Sans Mono",
+        "DejaVu Sans",
+        "Symbola",
+        "Unifont",
+    ];
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut push = |db: &Database, name: &str, out: &mut Vec<FontBlob>, seen: &mut std::collections::HashSet<String>| {
@@ -63,7 +73,7 @@ pub fn find_fonts() -> Result<Vec<FontBlob>> {
             }
         }
     };
-    for name in primary.iter().chain(cjk.iter()) {
+    for name in primary.iter().chain(cjk.iter()).chain(symbols.iter()) {
         push(&db, name, &mut out, &mut seen);
     }
     if out.is_empty() {

@@ -2,7 +2,7 @@ use crate::{font::find_fonts, pty::Pty, renderer::Renderer, vt::Grid};
 use std::{sync::mpsc::TryRecvError, sync::Arc, time::Instant};
 use winit::{
     application::ApplicationHandler,
-    event::{ElementState, WindowEvent},
+    event::{ElementState, Ime, WindowEvent},
     event_loop::ActiveEventLoop,
     keyboard::{Key, ModifiersState, NamedKey},
     window::{Window, WindowAttributes, WindowId},
@@ -15,6 +15,7 @@ pub struct State {
     pub parser: vte::Parser,
     pub pty: Pty,
     pub glitch: f32,
+    pub preediting: bool,
     last_tick: Instant,
     render_dt: f32,
 }
@@ -51,9 +52,35 @@ impl ApplicationHandler for App {
                 s.pty.resize(c as u16, r as u16);
             }
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed && !s.preediting =>
+            {
                 handle_key(s, &event.logical_key, self.mods)
             }
+            WindowEvent::Ime(ev) => match ev {
+                Ime::Enabled | Ime::Disabled => {
+                    s.preediting = false;
+                }
+                Ime::Preedit(text, _) => {
+                    s.preediting = !text.is_empty();
+                }
+                Ime::Commit(text) => {
+                    s.preediting = false;
+                    if !text.is_empty() {
+                        s.pty.write(text.as_bytes());
+                        let (cw, ch) = s.renderer.cell_size();
+                        s.renderer.particles.emit(
+                            [
+                                s.grid.cx() as f32 * cw + cw / 2.0,
+                                s.grid.cy() as f32 * ch + ch / 2.0,
+                            ],
+                            [1.0, 0.7, 0.2],
+                            (text.chars().count() * 6).min(48),
+                        );
+                        s.glitch = (s.glitch + 0.5).min(1.0);
+                    }
+                }
+            },
             WindowEvent::RedrawRequested => {
                 if let Err(e) = s.renderer.render(&s.grid, s.glitch, s.render_dt) {
                     log::warn!("render: {e}");
@@ -108,6 +135,7 @@ impl App {
             .with_title("kiraterm")
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 800));
         let window = Arc::new(el.create_window(attrs)?);
+        window.set_ime_allowed(true);
         let size = window.inner_size();
         let fonts = find_fonts()?;
         let renderer = pollster::block_on(Renderer::new(window.clone(), fonts))?;
@@ -119,6 +147,7 @@ impl App {
             parser: vte::Parser::new(),
             pty: Pty::spawn(c as u16, r as u16)?,
             glitch: 0.0,
+            preediting: false,
             last_tick: Instant::now(),
             render_dt: 0.0,
         })
