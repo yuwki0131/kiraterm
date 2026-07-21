@@ -6,6 +6,7 @@ use crate::{
 use anyhow::{Context, Result};
 use bytemuck::{Pod, Zeroable};
 use std::sync::Arc;
+use unicode_width::UnicodeWidthChar;
 use wgpu::util::DeviceExt;
 use winit::{dpi::PhysicalSize, window::Window};
 
@@ -39,6 +40,12 @@ struct PartVertex {
     color: [f32; 4],
 }
 
+pub struct Overlay {
+    pub text: String,
+    pub color: [f32; 4],
+    pub scale: f32,
+}
+
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -61,6 +68,7 @@ pub struct Renderer {
     part_vbo: wgpu::Buffer,
     part_cap: usize,
     pub particles: Particles,
+    pub overlay: Option<Overlay>,
     time: f32,
 }
 impl Renderer {
@@ -303,6 +311,7 @@ impl Renderer {
             part_vbo,
             part_cap,
             particles: Particles::default(),
+            overlay: None,
             time: 0.,
         })
     }
@@ -515,7 +524,83 @@ impl Renderer {
                 1.,
             );
         }
+        if let Some(ov) = self.overlay.take() {
+            self.push_overlay(&mut v, &ov);
+            self.overlay = Some(ov);
+        }
         v
+    }
+    fn push_overlay(&mut self, v: &mut Vec<TextVertex>, ov: &Overlay) {
+        let scale = ov.scale.max(0.1);
+        let cw = self.atlas.cell_w;
+        let ch = self.atlas.cell_h;
+        let cw_s = cw * scale;
+        let ch_s = ch * scale;
+        // width in cells (1 for narrow, 2 for wide) — approximate via unicode-width.
+        let mut total_cells = 0f32;
+        for c in ov.text.chars() {
+            let w = UnicodeWidthChar::width(c).unwrap_or(1) as f32;
+            total_cells += w;
+        }
+        let sw = self.config.width as f32;
+        let start_x = sw - total_cells * cw_s - cw_s * 0.8;
+        let start_y = ch_s * 0.4;
+        // subtle dark background band for legibility over any terminal content.
+        let band_pad = cw_s * 0.4;
+        quad_text(
+            v,
+            [start_x - band_pad, start_y - band_pad * 0.3],
+            [total_cells * cw_s + band_pad * 2.0, ch_s + band_pad * 0.6],
+            [0.; 4],
+            [0.02, 0.03, 0.08, 0.55],
+            1.,
+        );
+        let mut x = start_x;
+        for c in ov.text.chars() {
+            let w = UnicodeWidthChar::width(c).unwrap_or(1) as f32;
+            if c != ' ' && c != '\0' {
+                let q = self.atlas.get(c);
+                if q.width > 0 {
+                    let gx = x + q.xmin as f32 * scale;
+                    let gy = start_y
+                        + (self.atlas.baseline - q.ymin as f32 - q.height as f32) * scale;
+                    let uv = [
+                        q.x as f32 / self.atlas.width as f32,
+                        q.y as f32 / self.atlas.height as f32,
+                        (q.x + q.width) as f32 / self.atlas.width as f32,
+                        (q.y + q.height) as f32 / self.atlas.height as f32,
+                    ];
+                    // draw twice with a slight offset for a bright halo — combined
+                    // with the post-processing bloom this reads as a strong glow.
+                    let halo = [ov.color[0], ov.color[1], ov.color[2], ov.color[3] * 0.4];
+                    quad_text(
+                        v,
+                        [gx - 1.5, gy],
+                        [q.width as f32 * scale, q.height as f32 * scale],
+                        uv,
+                        halo,
+                        0.,
+                    );
+                    quad_text(
+                        v,
+                        [gx + 1.5, gy],
+                        [q.width as f32 * scale, q.height as f32 * scale],
+                        uv,
+                        halo,
+                        0.,
+                    );
+                    quad_text(
+                        v,
+                        [gx, gy],
+                        [q.width as f32 * scale, q.height as f32 * scale],
+                        uv,
+                        ov.color,
+                        0.,
+                    );
+                }
+            }
+            x += cw_s * w;
+        }
     }
     fn part_vertices(&self) -> Vec<PartVertex> {
         let mut v = Vec::with_capacity(self.particles.items.len() * 6);

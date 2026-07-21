@@ -1,5 +1,9 @@
-use crate::{font::find_fonts, pty::Pty, renderer::Renderer, vt::Grid};
-use rand::Rng;
+use crate::{
+    font::find_fonts,
+    pty::Pty,
+    renderer::{Overlay, Renderer},
+    vt::Grid,
+};
 use std::{
     sync::mpsc::TryRecvError,
     sync::Arc,
@@ -25,6 +29,7 @@ pub struct State {
     pub exec_start: Instant,
     pub exec_last_output: Option<Instant>,
     pub exec_had_output: bool,
+    pub exec_bytes_accum: u32,
     pub exec_phase: f32,
     last_tick: Instant,
     render_dt: f32,
@@ -131,8 +136,18 @@ impl ApplicationHandler for App {
                 n,
             );
             if s.executing {
-                s.exec_had_output = true;
-                s.exec_last_output = Some(now);
+                // ignore the raw enter echo — only start counting "real" output
+                // once we've seen more than a couple of bytes or a bit of time
+                // has passed. otherwise `sleep 5` would end the spinner ~250ms
+                // after enter (fooled by the \n echo).
+                s.exec_bytes_accum = s
+                    .exec_bytes_accum
+                    .saturating_add(s.grid.bytes_since_last);
+                let since_enter = now.duration_since(s.exec_start).as_millis();
+                if s.exec_bytes_accum > 4 || since_enter > 400 {
+                    s.exec_had_output = true;
+                    s.exec_last_output = Some(now);
+                }
             }
         }
         // Loading/executing effect: pulses glitch and streams particles from
@@ -171,6 +186,7 @@ impl App {
             exec_start: Instant::now(),
             exec_last_output: None,
             exec_had_output: false,
+            exec_bytes_accum: 0,
             exec_phase: 0.0,
             last_tick: Instant::now(),
             render_dt: 0.0,
@@ -183,11 +199,14 @@ fn dims(w: u32, h: u32, cell: (f32, f32)) -> (usize, usize) {
         (h as f32 / cell.1).floor().max(1.0) as usize,
     )
 }
+const SPINNER: &[char] = &['⣷', '⣯', '⣟', '⡿', '⢿', '⣻', '⣽', '⣾'];
+
 fn update_executing(s: &mut State, now: Instant) {
     // TUIs (vim, less, claude code, htop) take over via the alternate screen
-    // buffer; showing the loading pulse on top of them just gets in the way.
+    // buffer; a loading badge on top of them just gets in the way.
     if s.grid.is_alt() {
         s.executing = false;
+        s.renderer.overlay = None;
         return;
     }
     let quiet_ms = 250u128;
@@ -199,39 +218,28 @@ fn update_executing(s: &mut State, now: Instant) {
     };
     if done || now.duration_since(s.exec_start) >= safety {
         s.executing = false;
+        s.renderer.overlay = None;
         return;
     }
-    let dt_since_tick = now
-        .duration_since(s.last_tick)
-        .as_secs_f32()
-        .min(0.05);
-    s.exec_phase = (s.exec_phase + dt_since_tick * 3.0) % std::f32::consts::TAU;
-    // Pulsing glitch — sine wave floor so it never fully settles while waiting.
-    let floor = 0.28 + 0.22 * (s.exec_phase * 0.5).sin().abs();
-    s.glitch = s.glitch.max(floor);
-    // Emit a small stream of particles from a random edge, drifting inward-ish.
-    let size = s.window.inner_size();
-    let w = size.width as f32;
-    let h = size.height as f32;
-    if w > 4.0 && h > 4.0 {
-        let mut rng = rand::thread_rng();
-        let n_bursts = 2;
-        for _ in 0..n_bursts {
-            let edge = rng.gen_range(0..4);
-            let pos = match edge {
-                0 => [rng.gen_range(0.0..w), 0.0],
-                1 => [rng.gen_range(0.0..w), h - 1.0],
-                2 => [0.0, rng.gen_range(0.0..h)],
-                _ => [w - 1.0, rng.gen_range(0.0..h)],
-            };
-            let color = match rng.gen_range(0..3) {
-                0 => [1.0, 0.55, 0.15],   // amber
-                1 => [0.9, 0.2, 0.85],    // magenta
-                _ => [0.2, 0.95, 0.85],   // teal
-            };
-            s.renderer.particles.emit(pos, color, rng.gen_range(3..7));
-        }
-    }
+    let elapsed = now.duration_since(s.exec_start).as_secs_f32();
+    s.exec_phase = elapsed;
+    // pulsing glitch — a sine floor so it never fully settles while waiting.
+    let pulse = 0.5 + 0.5 * (elapsed * 3.0).sin();
+    s.glitch = s.glitch.max(0.25 + 0.25 * pulse);
+    // rotating braille spinner in the top-right corner, with elapsed time.
+    let idx = ((elapsed * 10.0) as usize) % SPINNER.len();
+    let spinner = SPINNER[idx];
+    let color_pulse = 0.75 + 0.25 * (elapsed * 4.0).sin();
+    let text = if elapsed >= 1.0 {
+        format!("{spinner} 実行中… {:.1}s", elapsed)
+    } else {
+        format!("{spinner} 実行中…")
+    };
+    s.renderer.overlay = Some(Overlay {
+        text,
+        color: [1.0, 0.85 * color_pulse, 0.25 * color_pulse, 1.0],
+        scale: 1.6,
+    });
 }
 
 fn handle_key(s: &mut State, key: &Key, mods: ModifiersState) {
@@ -271,7 +279,8 @@ fn handle_key(s: &mut State, key: &Key, mods: ModifiersState) {
         }
         _ => return,
     };
-    let is_enter = matches!(key, Key::Named(NamedKey::Enter));
+    let is_enter = matches!(key, Key::Named(NamedKey::Enter))
+        || matches!(key, Key::Character(v) if v.as_ref() == "\r" || v.as_ref() == "\n");
     s.pty.write(&out);
     out.clear();
     let (cw, ch) = s.renderer.cell_size();
@@ -289,6 +298,9 @@ fn handle_key(s: &mut State, key: &Key, mods: ModifiersState) {
         s.exec_start = Instant::now();
         s.exec_last_output = None;
         s.exec_had_output = false;
+        s.exec_bytes_accum = 0;
         s.exec_phase = 0.0;
+        // paint the spinner immediately so short commands still flash it.
+        update_executing(s, Instant::now());
     }
 }
