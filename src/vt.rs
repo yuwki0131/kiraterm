@@ -98,6 +98,9 @@ impl Grid {
     pub fn cells(&self) -> &[Cell] {
         &self.screen().cells
     }
+    pub fn is_alt(&self) -> bool {
+        self.alt
+    }
     fn screen(&self) -> &Screen {
         if self.alt {
             &self.alternate
