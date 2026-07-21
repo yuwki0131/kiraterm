@@ -1,7 +1,7 @@
 use crate::{
     font::Atlas,
     particles::Particles,
-    vt::{Grid, BLACK},
+    vt::{Grid, ATTR_CONT, ATTR_REVERSE, ATTR_UNDERLINE, BLACK},
 };
 use anyhow::{Context, Result};
 use bytemuck::{Pod, Zeroable};
@@ -64,7 +64,7 @@ pub struct Renderer {
     time: f32,
 }
 impl Renderer {
-    pub async fn new(window: Arc<Window>, font: Vec<u8>) -> Result<Self> {
+    pub async fn new(window: Arc<Window>, fonts: Vec<crate::font::FontBlob>) -> Result<Self> {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
@@ -108,7 +108,7 @@ impl Renderer {
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
-        let atlas = Atlas::new(font, 20.0)?;
+        let atlas = Atlas::new(fonts, 20.0)?;
         let atlas_tex = make_atlas(&device, &atlas);
         queue.write_texture(
             atlas_tex.as_image_copy(),
@@ -457,19 +457,28 @@ impl Renderer {
         Ok(())
     }
     fn text_vertices(&mut self, g: &Grid) -> Vec<TextVertex> {
-        for c in &g.cells {
+        let cells = g.cells();
+        for c in cells {
             self.atlas.get(c.ch);
         }
         let mut v = Vec::new();
         let (cw, ch) = (self.atlas.cell_w, self.atlas.cell_h);
         for y in 0..g.rows {
             for x in 0..g.cols {
-                let c = g.cells[y * g.cols + x];
-                let p = [x as f32 * cw, y as f32 * ch];
-                if c.bg != BLACK {
-                    quad_text(&mut v, p, [cw, ch], [0.; 4], rgba(c.bg), 1.);
+                let c = cells[y * g.cols + x];
+                if c.attrs & ATTR_CONT != 0 {
+                    continue;
                 }
-                if c.ch != ' ' {
+                let (fg, bg) = if c.attrs & ATTR_REVERSE != 0 {
+                    (c.bg, c.fg)
+                } else {
+                    (c.fg, c.bg)
+                };
+                let p = [x as f32 * cw, y as f32 * ch];
+                if bg != BLACK {
+                    quad_text(&mut v, p, [cw, ch], [0.; 4], rgba(bg), 1.);
+                }
+                if c.ch != ' ' && c.ch != '\0' {
                     let q = self.atlas.get(c.ch);
                     if q.width > 0 {
                         let gx = p[0] + q.xmin as f32;
@@ -485,22 +494,27 @@ impl Renderer {
                             [gx, gy],
                             [q.width as f32, q.height as f32],
                             uv,
-                            rgba(c.fg),
+                            rgba(fg),
                             0.,
                         );
                     }
                 }
+                if c.attrs & ATTR_UNDERLINE != 0 {
+                    quad_text(&mut v, [p[0], p[1] + ch - 1.], [cw, 1.], [0.; 4], rgba(fg), 1.);
+                }
             }
         }
-        let a = (0.6 + 0.4 * (self.time * 4.).sin()).abs();
-        quad_text(
-            &mut v,
-            [g.cx as f32 * cw, g.cy as f32 * ch + ch - 2.],
-            [cw, 2.],
-            [0.; 4],
-            [0., 1., 0.86, a],
-            1.,
-        );
+        if g.cursor_visible {
+            let a = (0.6 + 0.4 * (self.time * 4.).sin()).abs();
+            quad_text(
+                &mut v,
+                [g.cx() as f32 * cw, g.cy() as f32 * ch + ch - 2.],
+                [cw, 2.],
+                [0.; 4],
+                [0., 1., 0.86, a],
+                1.,
+            );
+        }
         v
     }
     fn part_vertices(&self) -> Vec<PartVertex> {

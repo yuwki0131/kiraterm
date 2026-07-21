@@ -998,6 +998,7 @@ dependencies = [
  "pollster",
  "portable-pty",
  "rand",
+ "unicode-width",
  "vte",
  "wgpu",
  "winit",

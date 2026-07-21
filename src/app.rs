@@ -1,5 +1,5 @@
-use crate::{font::find_font, pty::Pty, renderer::Renderer, vt::Grid};
-use std::{sync::Arc, time::Instant};
+use crate::{font::find_fonts, pty::Pty, renderer::Renderer, vt::Grid};
+use std::{sync::mpsc::TryRecvError, sync::Arc, time::Instant};
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, WindowEvent},
@@ -62,12 +62,36 @@ impl ApplicationHandler for App {
             _ => {}
         }
     }
-    fn about_to_wait(&mut self, _: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         let Some(s) = self.state.as_mut() else { return };
-        while let Ok(bytes) = s.pty.reader_rx.try_recv() {
-            for b in bytes {
-                s.parser.advance(&mut s.grid, b);
+        s.grid.bytes_since_last = 0;
+        loop {
+            match s.pty.reader_rx.try_recv() {
+                Ok(bytes) => {
+                    for b in bytes {
+                        s.parser.advance(&mut s.grid, b);
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    el.exit();
+                    return;
+                }
             }
+        }
+        if s.grid.bytes_since_last > 0 {
+            let (cw, ch) = s.renderer.cell_size();
+            let burst = (s.grid.bytes_since_last as f32 / 40.0).min(2.0);
+            s.glitch = (s.glitch + 0.15 + 0.15 * burst).min(1.0);
+            let n = (2.0 + burst * 6.0) as usize;
+            s.renderer.particles.emit(
+                [
+                    s.grid.cx() as f32 * cw + cw / 2.0,
+                    s.grid.cy() as f32 * ch + ch / 2.0,
+                ],
+                [1.0, 0.6, 0.9],
+                n,
+            );
         }
         let now = Instant::now();
         let dt = (now - s.last_tick).as_secs_f32().min(0.05);
@@ -85,8 +109,8 @@ impl App {
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 800));
         let window = Arc::new(el.create_window(attrs)?);
         let size = window.inner_size();
-        let font = find_font()?;
-        let renderer = pollster::block_on(Renderer::new(window.clone(), font))?;
+        let fonts = find_fonts()?;
+        let renderer = pollster::block_on(Renderer::new(window.clone(), fonts))?;
         let (c, r) = dims(size.width, size.height, renderer.cell_size());
         Ok(State {
             window,
@@ -148,8 +172,8 @@ fn handle_key(s: &mut State, key: &Key, mods: ModifiersState) {
     let (cw, ch) = s.renderer.cell_size();
     s.renderer.particles.emit(
         [
-            s.grid.cx as f32 * cw + cw / 2.0,
-            s.grid.cy as f32 * ch + ch / 2.0,
+            s.grid.cx() as f32 * cw + cw / 2.0,
+            s.grid.cy() as f32 * ch + ch / 2.0,
         ],
         [0.0, 1.0, 0.9],
         12,

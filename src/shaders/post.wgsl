@@ -42,7 +42,7 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let cx = uv.x - 0.5;
   let cy = uv.y - 0.5;
   let r2 = cx*cx + cy*cy;
-  let warp = 1.0 + 0.05 * r2;
+  let warp = 1.0 + 0.015 * r2;
   var suv = vec2<f32>(0.5 + cx * warp, 0.5 + cy * warp);
   let band = step(0.98, fract(sin((suv.y + u.time * 0.1) * 40.0) * 43758.5453));
   suv.x = suv.x + band * (hash21(vec2<f32>(u.time * 5.0, floor(suv.y * 60.0))) - 0.5) * 0.02 * u.glitch;
@@ -56,11 +56,11 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   color = color + glow * glow * 0.7;
   let sl = 0.85 + 0.15 * sin(frag.y * 3.14159);
   color = color * sl;
-  let vig = smoothstep(1.0, 0.3, r2 * 2.5);
-  color = color * vig;
+  let vig = smoothstep(1.2, 0.1, r2 * 1.2);
+  color = color * (0.85 + 0.15 * vig);
   let n = hash21(frag.xy + vec2<f32>(u.time * 60.0, 0.0)) * 0.06;
   color = color + n * vec3<f32>(0.4, 0.6, 0.7);
-  if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0) {
+  if (suv.x < -0.01 || suv.x > 1.01 || suv.y < -0.01 || suv.y > 1.01) {
     color = vec3<f32>(0.0);
   }
   return vec4<f32>(color, 1.0);

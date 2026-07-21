@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use fontdb::{Database, Family, Query, Stretch, Style, Weight};
-use fontdue::Font;
+use fontdue::{Font, FontSettings};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy)]
@@ -11,13 +11,20 @@ pub struct GlyphInfo {
     pub height: u32,
     pub xmin: i32,
     pub ymin: i32,
-    pub advance: f32,
+    pub font_ix: u8,
 }
 
-pub fn find_font() -> Result<Vec<u8>> {
+pub struct FontBlob {
+    pub bytes: Vec<u8>,
+    pub index: u32,
+}
+
+pub fn find_fonts() -> Result<Vec<FontBlob>> {
     let mut db = Database::new();
     db.load_system_fonts();
-    let names = [
+    let primary = [
+        "HackGen Console",
+        "HackGen",
         "JetBrainsMono Nerd Font",
         "JetBrains Mono",
         "Fira Code",
@@ -28,32 +35,64 @@ pub fn find_font() -> Result<Vec<u8>> {
         "Liberation Mono",
         "Ubuntu Mono",
     ];
-    let mut id = names.iter().find_map(|name| {
-        db.query(&Query {
+    let cjk = [
+        "HackGen Console",
+        "HackGen",
+        "Noto Sans Mono CJK JP",
+        "Noto Sans CJK JP",
+        "IPAGothic",
+        "TakaoGothic",
+        "Source Han Code JP",
+        "Sarasa Mono J",
+    ];
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut push = |db: &Database, name: &str, out: &mut Vec<FontBlob>, seen: &mut std::collections::HashSet<String>| {
+        if seen.contains(name) {
+            return;
+        }
+        if let Some(id) = db.query(&Query {
             families: &[Family::Name(name)],
             weight: Weight::NORMAL,
             stretch: Stretch::Normal,
             style: Style::Normal,
-        })
-    });
-    if id.is_none() {
-        id = db.query(&Query {
+        }) {
+            if let Some((bytes, index)) = db.with_face_data(id, |data, ix| (data.to_vec(), ix)) {
+                out.push(FontBlob { bytes, index });
+                seen.insert(name.to_string());
+            }
+        }
+    };
+    for name in primary.iter().chain(cjk.iter()) {
+        push(&db, name, &mut out, &mut seen);
+    }
+    if out.is_empty() {
+        if let Some(id) = db.query(&Query {
             families: &[Family::Monospace],
             weight: Weight::NORMAL,
             stretch: Stretch::Normal,
             style: Style::Normal,
-        });
+        }) {
+            if let Some((bytes, index)) = db.with_face_data(id, |data, ix| (data.to_vec(), ix)) {
+                out.push(FontBlob { bytes, index });
+            }
+        }
     }
-    if id.is_none() {
-        id = db.faces().next().map(|f| f.id);
+    if out.is_empty() {
+        if let Some(id) = db.faces().next().map(|f| f.id) {
+            if let Some((bytes, index)) = db.with_face_data(id, |data, ix| (data.to_vec(), ix)) {
+                out.push(FontBlob { bytes, index });
+            }
+        }
     }
-    let id = id.ok_or_else(|| anyhow!("no system font found"))?;
-    db.with_face_data(id, |data, _| data.to_vec())
-        .ok_or_else(|| anyhow!("could not read font data"))
+    if out.is_empty() {
+        return Err(anyhow!("no system font found"));
+    }
+    Ok(out)
 }
 
 pub struct Atlas {
-    pub font: Font,
+    pub fonts: Vec<Font>,
     pub px_size: f32,
     pub bitmap: Vec<u8>,
     pub width: u32,
@@ -69,17 +108,28 @@ pub struct Atlas {
 }
 
 impl Atlas {
-    pub fn new(bytes: Vec<u8>, px_size: f32) -> Result<Self> {
-        let font =
-            Font::from_bytes(bytes, fontdue::FontSettings::default()).map_err(|e| anyhow!(e))?;
-        let lm = font
+    pub fn new(blobs: Vec<FontBlob>, px_size: f32) -> Result<Self> {
+        let mut fonts = Vec::new();
+        for b in blobs {
+            let f = Font::from_bytes(
+                b.bytes,
+                FontSettings {
+                    collection_index: b.index,
+                    ..FontSettings::default()
+                },
+            )
+            .map_err(|e| anyhow!(e))?;
+            fonts.push(f);
+        }
+        let primary = &fonts[0];
+        let lm = primary
             .horizontal_line_metrics(px_size)
             .ok_or_else(|| anyhow!("font has no horizontal metrics"))?;
+        let cell_w = primary.metrics('M', px_size).advance_width.ceil();
+        let cell_h = (lm.ascent - lm.descent + lm.line_gap).ceil();
+        let baseline = lm.ascent;
         let mut a = Self {
-            cell_w: font.metrics('M', px_size).advance_width.ceil(),
-            cell_h: (lm.ascent - lm.descent + lm.line_gap).ceil(),
-            baseline: lm.ascent,
-            font,
+            fonts,
             px_size,
             bitmap: vec![0; 1024 * 1024],
             width: 1024,
@@ -89,6 +139,9 @@ impl Atlas {
             row_h: 0,
             glyphs: HashMap::new(),
             dirty: true,
+            cell_w,
+            cell_h,
+            baseline,
         };
         for b in 32u8..128 {
             a.rasterize(b as char);
@@ -101,8 +154,17 @@ impl Atlas {
         }
         self.glyphs[&ch]
     }
+    fn pick_font(&self, ch: char) -> u8 {
+        for (i, f) in self.fonts.iter().enumerate() {
+            if f.lookup_glyph_index(ch) != 0 {
+                return i as u8;
+            }
+        }
+        0
+    }
     fn rasterize(&mut self, ch: char) {
-        let (m, pixels) = self.font.rasterize(ch, self.px_size);
+        let ix = self.pick_font(ch);
+        let (m, pixels) = self.fonts[ix as usize].rasterize(ch, self.px_size);
         let mut info = GlyphInfo {
             x: 0,
             y: 0,
@@ -110,7 +172,7 @@ impl Atlas {
             height: m.height as u32,
             xmin: m.xmin,
             ymin: m.ymin,
-            advance: m.advance_width,
+            font_ix: ix,
         };
         if m.width > 0 && m.height > 0 {
             if self.cursor_x + info.width + 1 > self.width {
