@@ -1,0 +1,158 @@
+use crate::{font::find_font, pty::Pty, renderer::Renderer, vt::Grid};
+use std::{sync::Arc, time::Instant};
+use winit::{
+    application::ApplicationHandler,
+    event::{ElementState, WindowEvent},
+    event_loop::ActiveEventLoop,
+    keyboard::{Key, ModifiersState, NamedKey},
+    window::{Window, WindowAttributes, WindowId},
+};
+
+pub struct State {
+    pub window: Arc<Window>,
+    pub renderer: Renderer,
+    pub grid: Grid,
+    pub parser: vte::Parser,
+    pub pty: Pty,
+    pub glitch: f32,
+    last_tick: Instant,
+    render_dt: f32,
+}
+#[derive(Default)]
+pub struct App {
+    state: Option<State>,
+    mods: ModifiersState,
+}
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, el: &ActiveEventLoop) {
+        if self.state.is_some() {
+            return;
+        }
+        match self.init(el) {
+            Ok(s) => self.state = Some(s),
+            Err(e) => {
+                log::error!("startup failed: {e:#}");
+                el.exit();
+            }
+        }
+    }
+    fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        let Some(s) = self.state.as_mut() else { return };
+        if id != s.window.id() {
+            return;
+        }
+        match event {
+            WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::Resized(z) => {
+                s.renderer.resize(z);
+                let (c, r) = dims(z.width, z.height, s.renderer.cell_size());
+                s.grid.resize(c, r);
+                s.pty.resize(c as u16, r as u16);
+            }
+            WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                handle_key(s, &event.logical_key, self.mods)
+            }
+            WindowEvent::RedrawRequested => {
+                if let Err(e) = s.renderer.render(&s.grid, s.glitch, s.render_dt) {
+                    log::warn!("render: {e}");
+                }
+            }
+            _ => {}
+        }
+    }
+    fn about_to_wait(&mut self, _: &ActiveEventLoop) {
+        let Some(s) = self.state.as_mut() else { return };
+        while let Ok(bytes) = s.pty.reader_rx.try_recv() {
+            for b in bytes {
+                s.parser.advance(&mut s.grid, b);
+            }
+        }
+        let now = Instant::now();
+        let dt = (now - s.last_tick).as_secs_f32().min(0.05);
+        s.last_tick = now;
+        s.render_dt = dt;
+        s.renderer.particles.update(dt);
+        s.glitch = (s.glitch - dt * 2.0).max(0.0);
+        s.window.request_redraw();
+    }
+}
+impl App {
+    fn init(&self, el: &ActiveEventLoop) -> anyhow::Result<State> {
+        let attrs = WindowAttributes::default()
+            .with_title("kiraterm")
+            .with_inner_size(winit::dpi::LogicalSize::new(1280, 800));
+        let window = Arc::new(el.create_window(attrs)?);
+        let size = window.inner_size();
+        let font = find_font()?;
+        let renderer = pollster::block_on(Renderer::new(window.clone(), font))?;
+        let (c, r) = dims(size.width, size.height, renderer.cell_size());
+        Ok(State {
+            window,
+            renderer,
+            grid: Grid::new(c, r),
+            parser: vte::Parser::new(),
+            pty: Pty::spawn(c as u16, r as u16)?,
+            glitch: 0.0,
+            last_tick: Instant::now(),
+            render_dt: 0.0,
+        })
+    }
+}
+fn dims(w: u32, h: u32, cell: (f32, f32)) -> (usize, usize) {
+    (
+        (w as f32 / cell.0).floor().max(1.0) as usize,
+        (h as f32 / cell.1).floor().max(1.0) as usize,
+    )
+}
+fn handle_key(s: &mut State, key: &Key, mods: ModifiersState) {
+    let mut out = match key {
+        Key::Named(n) => match n {
+            NamedKey::Enter => b"\r".to_vec(),
+            NamedKey::Backspace => b"\x7f".to_vec(),
+            NamedKey::Tab => b"\t".to_vec(),
+            NamedKey::Escape => b"\x1b".to_vec(),
+            NamedKey::Space => b" ".to_vec(),
+            NamedKey::ArrowUp => b"\x1b[A".to_vec(),
+            NamedKey::ArrowDown => b"\x1b[B".to_vec(),
+            NamedKey::ArrowRight => b"\x1b[C".to_vec(),
+            NamedKey::ArrowLeft => b"\x1b[D".to_vec(),
+            NamedKey::Home => b"\x1b[H".to_vec(),
+            NamedKey::End => b"\x1b[F".to_vec(),
+            NamedKey::PageUp => b"\x1b[5~".to_vec(),
+            NamedKey::PageDown => b"\x1b[6~".to_vec(),
+            NamedKey::Delete => b"\x1b[3~".to_vec(),
+            _ => return,
+        },
+        Key::Character(v) => {
+            let mut b = if mods.control_key() {
+                let c = v.chars().next().unwrap_or('\0').to_ascii_uppercase();
+                if c.is_ascii_uppercase() {
+                    vec![c as u8 - b'A' + 1]
+                } else {
+                    return;
+                }
+            } else {
+                v.as_bytes().to_vec()
+            };
+            if mods.alt_key() {
+                b.insert(0, 0x1b)
+            }
+            b
+        }
+        _ => return,
+    };
+    s.pty.write(&out);
+    out.clear();
+    let (cw, ch) = s.renderer.cell_size();
+    s.renderer.particles.emit(
+        [
+            s.grid.cx as f32 * cw + cw / 2.0,
+            s.grid.cy as f32 * ch + ch / 2.0,
+        ],
+        [0.0, 1.0, 0.9],
+        12,
+    );
+    s.glitch = (s.glitch + 0.6).min(1.0);
+}
