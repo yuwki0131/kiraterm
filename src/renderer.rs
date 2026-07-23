@@ -532,29 +532,37 @@ impl Renderer {
     }
     fn push_overlay(&mut self, v: &mut Vec<TextVertex>, ov: &Overlay) {
         let scale = ov.scale.max(0.1);
-        let cw = self.atlas.cell_w;
-        let ch = self.atlas.cell_h;
-        let cw_s = cw * scale;
-        let ch_s = ch * scale;
-        // width in cells (1 for narrow, 2 for wide) — approximate via unicode-width.
+        let cw_s = self.atlas.cell_w * scale;
+        let ch_s = self.atlas.cell_h * scale;
         let mut total_cells = 0f32;
         for c in ov.text.chars() {
-            let w = UnicodeWidthChar::width(c).unwrap_or(1) as f32;
-            total_cells += w;
+            total_cells += UnicodeWidthChar::width(c).unwrap_or(1) as f32;
         }
         let sw = self.config.width as f32;
-        let start_x = sw - total_cells * cw_s - cw_s * 0.8;
-        let start_y = ch_s * 0.4;
-        // subtle dark background band for legibility over any terminal content.
-        let band_pad = cw_s * 0.4;
+        let start_x = sw - total_cells * cw_s - cw_s * 1.2;
+        let start_y = ch_s * 0.6;
+        // thin bracket accents flanking the overlay — reads as a HUD chip.
+        let accent = [ov.color[0], ov.color[1], ov.color[2], 0.75];
+        let bar_w = (cw_s * 0.18).max(1.5);
+        let bar_h = ch_s * 0.9;
+        let bar_y = start_y + (ch_s - bar_h) * 0.5;
         quad_text(
             v,
-            [start_x - band_pad, start_y - band_pad * 0.3],
-            [total_cells * cw_s + band_pad * 2.0, ch_s + band_pad * 0.6],
+            [start_x - cw_s * 0.55, bar_y],
+            [bar_w, bar_h],
             [0.; 4],
-            [0.02, 0.03, 0.08, 0.55],
+            accent,
             1.,
         );
+        quad_text(
+            v,
+            [start_x + total_cells * cw_s + cw_s * 0.35, bar_y],
+            [bar_w, bar_h],
+            [0.; 4],
+            accent,
+            1.,
+        );
+        // main text — draw with a soft horizontal halo so it blooms through post.
         let mut x = start_x;
         for c in ov.text.chars() {
             let w = UnicodeWidthChar::width(c).unwrap_or(1) as f32;
@@ -570,33 +578,11 @@ impl Renderer {
                         (q.x + q.width) as f32 / self.atlas.width as f32,
                         (q.y + q.height) as f32 / self.atlas.height as f32,
                     ];
-                    // draw twice with a slight offset for a bright halo — combined
-                    // with the post-processing bloom this reads as a strong glow.
-                    let halo = [ov.color[0], ov.color[1], ov.color[2], ov.color[3] * 0.4];
-                    quad_text(
-                        v,
-                        [gx - 1.5, gy],
-                        [q.width as f32 * scale, q.height as f32 * scale],
-                        uv,
-                        halo,
-                        0.,
-                    );
-                    quad_text(
-                        v,
-                        [gx + 1.5, gy],
-                        [q.width as f32 * scale, q.height as f32 * scale],
-                        uv,
-                        halo,
-                        0.,
-                    );
-                    quad_text(
-                        v,
-                        [gx, gy],
-                        [q.width as f32 * scale, q.height as f32 * scale],
-                        uv,
-                        ov.color,
-                        0.,
-                    );
+                    let sz = [q.width as f32 * scale, q.height as f32 * scale];
+                    let halo = [ov.color[0], ov.color[1], ov.color[2], ov.color[3] * 0.35];
+                    quad_text(v, [gx - 1.8, gy], sz, uv, halo, 0.);
+                    quad_text(v, [gx + 1.8, gy], sz, uv, halo, 0.);
+                    quad_text(v, [gx, gy], sz, uv, ov.color, 0.);
                 }
             }
             x += cw_s * w;

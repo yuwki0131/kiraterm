@@ -150,8 +150,8 @@ impl ApplicationHandler for App {
                 }
             }
         }
-        // Loading/executing effect: pulses glitch and streams particles from
-        // the window edges until the child has quiesced (or a TUI takes over).
+        // Loading/executing effect: pulses glitch and paints a HUD chip while
+        // the child hasn't quiesced yet (and hasn't taken over via alt-screen).
         if s.executing {
             update_executing(s, now);
         }
@@ -199,7 +199,9 @@ fn dims(w: u32, h: u32, cell: (f32, f32)) -> (usize, usize) {
         (h as f32 / cell.1).floor().max(1.0) as usize,
     )
 }
-const SPINNER: &[char] = &['⣷', '⣯', '⣟', '⡿', '⢿', '⣻', '⣽', '⣾'];
+// scrolling block pattern — reads as a running-wave activity bar.
+const BAR_STEPS: &[char] = &['░', '▒', '▓', '█', '▓', '▒'];
+const BAR_WIDTH: usize = 6;
 
 fn update_executing(s: &mut State, now: Instant) {
     // TUIs (vim, less, claude code, htop) take over via the alternate screen
@@ -223,22 +225,30 @@ fn update_executing(s: &mut State, now: Instant) {
     }
     let elapsed = now.duration_since(s.exec_start).as_secs_f32();
     s.exec_phase = elapsed;
-    // pulsing glitch — a sine floor so it never fully settles while waiting.
+    // subtle glitch pulse — a sine floor so the CRT never fully settles.
     let pulse = 0.5 + 0.5 * (elapsed * 3.0).sin();
-    s.glitch = s.glitch.max(0.25 + 0.25 * pulse);
-    // rotating braille spinner in the top-right corner, with elapsed time.
-    let idx = ((elapsed * 10.0) as usize) % SPINNER.len();
-    let spinner = SPINNER[idx];
-    let color_pulse = 0.75 + 0.25 * (elapsed * 4.0).sin();
-    let text = if elapsed >= 1.0 {
-        format!("{spinner} 実行中… {:.1}s", elapsed)
-    } else {
-        format!("{spinner} 実行中…")
-    };
+    s.glitch = s.glitch.max(0.22 + 0.18 * pulse);
+    // scrolling wave bar: each column samples BAR_STEPS at a phase offset,
+    // giving a matrix-style running-block indicator.
+    let step = (elapsed * 12.0) as isize;
+    let mut bar = String::with_capacity(BAR_WIDTH * 4);
+    for col in 0..BAR_WIDTH {
+        let i = (step + col as isize).rem_euclid(BAR_STEPS.len() as isize) as usize;
+        bar.push(BAR_STEPS[i]);
+    }
+    let text = format!("{bar} EXEC {:>5.1}s", elapsed);
+    // neon-cyan pulses to amber twice a second — reads as "live signal".
+    let hue = (elapsed * 2.0).sin() * 0.5 + 0.5;
+    let color = [
+        0.25 + 0.75 * hue,
+        1.0 - 0.15 * hue,
+        0.9 - 0.7 * hue,
+        1.0,
+    ];
     s.renderer.overlay = Some(Overlay {
         text,
-        color: [1.0, 0.85 * color_pulse, 0.25 * color_pulse, 1.0],
-        scale: 1.6,
+        color,
+        scale: 1.25,
     });
 }
 
